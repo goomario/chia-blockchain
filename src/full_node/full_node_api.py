@@ -171,7 +171,14 @@ class FullNodeAPI:
         if request.tip not in self.full_node.blockchain.sub_blocks:
             self.log.error(f"got weight proof request for unknown peak {request.tip}")
             return None
+        start_time = time.time()
         wp = await self.full_node.weight_proof_handler.get_proof_of_weight(request.tip)
+        end_time = time.time()
+        self.log.info(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self.log.info(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self.log.info(f"Weight proof for {request.tip} took {end_time-start_time}")
+        self.log.info(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        self.log.info(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         if wp is None:
             self.log.error(f"failed creating weight proof for peak {request.tip}")
             return None
@@ -404,88 +411,90 @@ class FullNodeAPI:
     ) -> Optional[Message]:
         if self.full_node.sync_store.get_sync_mode():
             return None
-        async with self.full_node.timelord_lock:
-            # Already have signage point
-            if (
-                self.full_node.full_node_store.get_signage_point(request.challenge_chain_vdf.output.get_hash())
-                is not None
-            ):
-                return None
-            peak = self.full_node.blockchain.get_peak()
-            if peak is not None and peak.sub_block_height > self.full_node.constants.MAX_SUB_SLOT_SUB_BLOCKS:
-                sub_slot_iters = peak.sub_slot_iters
-                difficulty = uint64(peak.weight - self.full_node.blockchain.sub_blocks[peak.prev_hash].weight)
-                next_sub_slot_iters = self.full_node.blockchain.get_next_slot_iters(peak.header_hash, True)
-                next_difficulty = self.full_node.blockchain.get_next_difficulty(peak.header_hash, True)
-                sub_slots_for_peak = await self.full_node.blockchain.get_sp_and_ip_sub_slots(peak.header_hash)
-                assert sub_slots_for_peak is not None
-                ip_sub_slot: Optional[EndOfSubSlotBundle] = sub_slots_for_peak[1]
-            else:
-                sub_slot_iters = self.full_node.constants.SUB_SLOT_ITERS_STARTING
-                difficulty = self.full_node.constants.DIFFICULTY_STARTING
-                next_sub_slot_iters = sub_slot_iters
-                next_difficulty = difficulty
-                ip_sub_slot = None
+        start_time = time.time()
+        # Already have signage point
+        end_time = time.time()
+        self.log.info(f"after lock: {end_time-start_time} / {request.challenge_chain_vdf.output.get_hash()}")
+        if (
+            self.full_node.full_node_store.get_signage_point(request.challenge_chain_vdf.output.get_hash())
+            is not None
+        ):
+            return None
+        peak = self.full_node.blockchain.get_peak()
+        if peak is not None and peak.sub_block_height > self.full_node.constants.MAX_SUB_SLOT_SUB_BLOCKS:
+            sub_slot_iters = peak.sub_slot_iters
+            difficulty = uint64(peak.weight - self.full_node.blockchain.sub_blocks[peak.prev_hash].weight)
+            next_sub_slot_iters = self.full_node.blockchain.get_next_slot_iters(peak.header_hash, True)
+            next_difficulty = self.full_node.blockchain.get_next_difficulty(peak.header_hash, True)
+            sub_slots_for_peak = await self.full_node.blockchain.get_sp_and_ip_sub_slots(peak.header_hash)
+            assert sub_slots_for_peak is not None
+            ip_sub_slot: Optional[EndOfSubSlotBundle] = sub_slots_for_peak[1]
+        else:
+            sub_slot_iters = self.full_node.constants.SUB_SLOT_ITERS_STARTING
+            difficulty = self.full_node.constants.DIFFICULTY_STARTING
+            next_sub_slot_iters = sub_slot_iters
+            next_difficulty = difficulty
+            ip_sub_slot = None
 
-            added = self.full_node.full_node_store.new_signage_point(
+        added = self.full_node.full_node_store.new_signage_point(
+            request.index_from_challenge,
+            self.full_node.blockchain.sub_blocks,
+            self.full_node.blockchain.get_peak(),
+            next_sub_slot_iters,
+            SignagePoint(
+                request.challenge_chain_vdf,
+                request.challenge_chain_proof,
+                request.reward_chain_vdf,
+                request.reward_chain_proof,
+            ),
+        )
+
+        if added:
+            self.log.info(
+                f"⏲️  Finished signage point {request.index_from_challenge}/"
+                f"{self.full_node.constants.NUM_SPS_SUB_SLOT}: "
+                f"{request.challenge_chain_vdf.output.get_hash()} "
+            )
+            sub_slot_tuple = self.full_node.full_node_store.get_sub_slot(request.challenge_chain_vdf.challenge)
+            if sub_slot_tuple is not None:
+                prev_challenge = sub_slot_tuple[0].challenge_chain.challenge_chain_end_of_slot_vdf.challenge
+            else:
+                prev_challenge = None
+            # Notify nodes of the new signage point
+            broadcast = full_node_protocol.NewSignagePointOrEndOfSubSlot(
+                prev_challenge,
+                request.challenge_chain_vdf.challenge,
                 request.index_from_challenge,
-                self.full_node.blockchain.sub_blocks,
-                self.full_node.blockchain.get_peak(),
-                next_sub_slot_iters,
-                SignagePoint(
-                    request.challenge_chain_vdf,
-                    request.challenge_chain_proof,
-                    request.reward_chain_vdf,
-                    request.reward_chain_proof,
-                ),
+                request.reward_chain_vdf.challenge,
+            )
+            msg = Message("new_signage_point_or_end_of_sub_slot", broadcast)
+            await self.server.send_to_all_except([msg], NodeType.FULL_NODE, peer.peer_node_id)
+
+            if peak is not None and peak.sub_block_height > self.full_node.constants.MAX_SUB_SLOT_SUB_BLOCKS:
+                # Makes sure to potentially update the difficulty if we are past the peak (into a new sub-slot)
+                assert ip_sub_slot is not None
+                if request.challenge_chain_vdf.challenge != ip_sub_slot.challenge_chain.get_hash():
+                    difficulty = next_difficulty
+                    sub_slot_iters = next_sub_slot_iters
+
+            # Notify farmers of the new signage point
+            broadcast_farmer = farmer_protocol.NewSignagePoint(
+                request.challenge_chain_vdf.challenge,
+                request.challenge_chain_vdf.output.get_hash(),
+                request.reward_chain_vdf.output.get_hash(),
+                difficulty,
+                sub_slot_iters,
+                request.index_from_challenge,
+            )
+            msg = Message("new_signage_point", broadcast_farmer)
+            await self.server.send_to_all([msg], NodeType.FARMER)
+        else:
+            self.log.warning(
+                f"Signage point {request.index_from_challenge} not added, CC challenge: "
+                f"{request.challenge_chain_vdf.challenge}, RC challenge: {request.reward_chain_vdf.challenge}"
             )
 
-            if added:
-                self.log.info(
-                    f"⏲️  Finished signage point {request.index_from_challenge}/"
-                    f"{self.full_node.constants.NUM_SPS_SUB_SLOT}: "
-                    f"{request.challenge_chain_vdf.output.get_hash()} "
-                )
-                sub_slot_tuple = self.full_node.full_node_store.get_sub_slot(request.challenge_chain_vdf.challenge)
-                if sub_slot_tuple is not None:
-                    prev_challenge = sub_slot_tuple[0].challenge_chain.challenge_chain_end_of_slot_vdf.challenge
-                else:
-                    prev_challenge = None
-                # Notify nodes of the new signage point
-                broadcast = full_node_protocol.NewSignagePointOrEndOfSubSlot(
-                    prev_challenge,
-                    request.challenge_chain_vdf.challenge,
-                    request.index_from_challenge,
-                    request.reward_chain_vdf.challenge,
-                )
-                msg = Message("new_signage_point_or_end_of_sub_slot", broadcast)
-                await self.server.send_to_all_except([msg], NodeType.FULL_NODE, peer.peer_node_id)
-
-                if peak is not None and peak.sub_block_height > self.full_node.constants.MAX_SUB_SLOT_SUB_BLOCKS:
-                    # Makes sure to potentially update the difficulty if we are past the peak (into a new sub-slot)
-                    assert ip_sub_slot is not None
-                    if request.challenge_chain_vdf.challenge != ip_sub_slot.challenge_chain.get_hash():
-                        difficulty = next_difficulty
-                        sub_slot_iters = next_sub_slot_iters
-
-                # Notify farmers of the new signage point
-                broadcast_farmer = farmer_protocol.NewSignagePoint(
-                    request.challenge_chain_vdf.challenge,
-                    request.challenge_chain_vdf.output.get_hash(),
-                    request.reward_chain_vdf.output.get_hash(),
-                    difficulty,
-                    sub_slot_iters,
-                    request.index_from_challenge,
-                )
-                msg = Message("new_signage_point", broadcast_farmer)
-                await self.server.send_to_all([msg], NodeType.FARMER)
-            else:
-                self.log.warning(
-                    f"Signage point {request.index_from_challenge} not added, CC challenge: "
-                    f"{request.challenge_chain_vdf.challenge}, RC challenge: {request.reward_chain_vdf.challenge}"
-                )
-
-            return None
+        return None
 
     @peer_required
     @api_request

@@ -4,6 +4,7 @@ import ssl
 from ipaddress import ip_address, IPv6Address
 from pathlib import Path
 from typing import Any, List, Dict, Callable, Optional, Set
+import time
 
 from aiohttp.web_app import Application
 from aiohttp.web_runner import TCPSite
@@ -291,10 +292,9 @@ class ChiaServer:
 
             async def api_call(payload: Payload, connection: WSChiaConnection):
                 try:
+                    start_time = time.time()
                     full_message = payload.msg
-                    connection.log.info(
-                        f"<- {full_message.function} from peer {connection.peer_node_id} {connection.peer_host}"
-                    )
+
                     if len(full_message.function) == 0 or full_message.function.startswith("_"):
                         # This prevents remote calling of private methods that start with "_"
                         self.log.error(f"Non existing function: {full_message.function}")
@@ -319,6 +319,10 @@ class ChiaServer:
                         payload_id = payload.id
                         response_payload = Payload(response, payload_id)
                         await connection.reply_to_request(response_payload)
+                    end_time = time.time()
+                    connection.log.info(
+                        f"<- {full_message.function}, time: {end_time-start_time}, from peer {connection.peer_node_id} {connection.peer_host}"
+                    )
                 except Exception as e:
                     if self.connection_close_task is None:
                         tb = traceback.format_exc()

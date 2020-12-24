@@ -298,6 +298,7 @@ class FullNodeStore:
 
         # If we don't have this slot, return False
         if index == 0 or index >= self.constants.NUM_SPS_SUB_SLOT:
+            log.info("not added , index == 0 or index >= self.constants.NUM_SPS_SUB_SLOT")
             return False
         assert (
             signage_point.cc_vdf is not None
@@ -370,6 +371,7 @@ class FullNodeStore:
                         signage_point.rc_vdf.output,
                     )
                 if not signage_point.cc_vdf == replace(cc_vdf_info_expected, number_of_iterations=delta_iters):
+                    log.info("not added , signage_point.cc_vdf == replace(cc_vdf_info_expected, number_of_iterations=delta_iters")
                     return False
                 if check_from_start_of_ss:
                     start_ele = ClassgroupElement.get_default_element()
@@ -381,6 +383,7 @@ class FullNodeStore:
                     start_ele,
                     cc_vdf_info_expected,
                 ):
+                    log.info("not added , 1 not signage_point.cc_proof.is_valid(")
                     return False
                 if not signage_point.rc_proof.is_valid(
                     self.constants,
@@ -388,10 +391,12 @@ class FullNodeStore:
                     signage_point.rc_vdf,
                     rc_vdf_info_expected,
                 ):
+                    log.info("not added , not signage_point.rc_proof.is_valid(")
                     return False
 
                 sp_arr[index] = signage_point
                 return True
+        log.info("not added , False")
         return False
 
     def get_signage_point(self, cc_signage_point: bytes32) -> Optional[SignagePoint]:
